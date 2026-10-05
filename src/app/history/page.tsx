@@ -1,11 +1,49 @@
-const transactions = [
-  { id: "TX-1001", time: "10:15", item: "フードセット x2", total: 2400, payment: "カード" },
-  { id: "TX-1002", time: "10:42", item: "ドリンク x3", total: 1200, payment: "現金" },
-  { id: "TX-1003", time: "11:05", item: "缶バッジ x1", total: 800, payment: "QR Pay" },
-  { id: "TX-1004", time: "11:28", item: "アミューズメント券 x4", total: 2000, payment: "カード" },
-];
+"use client";
+
+import { useEffect, useState } from "react";
+import { useCashier } from "@/components/app-shell";
+import { fetchSales, type Sale } from "@/lib/data";
+import { supabase } from "@/lib/supabase";
 
 export default function HistoryPage() {
+  const { user } = useCashier();
+  const [sales, setSales] = useState<Sale[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let mounted = true;
+    const client = supabase;
+    const load = async (initial = false) => {
+      if (initial) setLoading(true);
+      try {
+        const result = await fetchSales(user.id);
+        if (mounted) {
+          setSales(result);
+          setError("");
+        }
+      } catch (loadError) {
+        if (mounted) setError(loadError instanceof Error ? loadError.message : "履歴を読み込めませんでした。");
+      } finally {
+        if (mounted && initial) setLoading(false);
+      }
+    };
+
+    void load(true);
+    if (!client) return () => { mounted = false; };
+    const channel = client
+      .channel(`sales-${user.id}`)
+      .on("postgres_changes", { event: "*", schema: "public", table: "sales", filter: `owner_id=eq.${user.id}` }, () => {
+        void load();
+      })
+      .subscribe();
+
+    return () => {
+      mounted = false;
+      void client.removeChannel(channel);
+    };
+  }, [user.id]);
+
   return (
     <div className="space-y-6">
       <div className="rounded-2xl border border-[#d7e0eb] bg-white p-5 shadow-sm">
@@ -21,18 +59,21 @@ export default function HistoryPage() {
           <span>支払</span>
         </div>
 
-        {transactions.map((row) => (
+        {sales.map((row) => (
           <div
             key={row.id}
             className="grid grid-cols-[1.2fr_1.4fr_0.8fr_0.8fr] border-t border-[#d7e0eb] px-4 py-3 text-sm text-[#334155]"
           >
-            <span>{row.time}</span>
-            <span>{row.item}</span>
+            <span>{new Date(row.created_at).toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" })}</span>
+            <span>{row.sale_items.map((item) => `${item.product_name} x${item.quantity}`).join(", ")}</span>
             <span className="font-semibold text-[#0a6e54]">¥{row.total.toLocaleString()}</span>
-            <span>{row.payment}</span>
+            <span>{row.payment_method}</span>
           </div>
         ))}
+        {loading && <p className="border-t border-[#d7e0eb] px-4 py-6 text-sm text-[#526071]">履歴を読み込み中...</p>}
+        {!loading && !error && sales.length === 0 && <p className="border-t border-[#d7e0eb] px-4 py-6 text-sm text-[#526071]">まだ会計履歴がありません。</p>}
       </div>
+      {error && <p role="alert" className="text-sm text-[#b42318]">{error}</p>}
     </div>
   );
 }

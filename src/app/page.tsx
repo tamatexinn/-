@@ -2,24 +2,16 @@
 
 import { useMemo, useState } from "react";
 import { Minus, Plus, ReceiptText, ShoppingCart, Trash2 } from "lucide-react";
-
-type Product = {
-  id: number;
-  name: string;
-  price: number;
-  category: string;
-};
-
-const products: Product[] = [
-  { id: 1, name: "アミューズメント券", price: 500, category: "券" },
-  { id: 2, name: "フードセット", price: 1200, category: "食事" },
-  { id: 3, name: "ドリンク", price: 400, category: "飲み物" },
-  { id: 4, name: "缶バッジ", price: 800, category: "グッズ" },
-];
+import { useProducts } from "@/hooks/use-products";
+import { supabase } from "@/lib/supabase";
 
 export default function HomePage() {
-  const [cart, setCart] = useState<Record<number, number>>({});
+  const { products, loading, error: productsError } = useProducts();
+  const [cart, setCart] = useState<Record<string, number>>({});
   const [payment, setPayment] = useState("カード");
+  const [saleError, setSaleError] = useState("");
+  const [saleMessage, setSaleMessage] = useState("");
+  const [submitting, setSubmitting] = useState(false);
 
   const lineItems = useMemo(
     () =>
@@ -29,7 +21,7 @@ export default function HomePage() {
           ...product,
           quantity: cart[product.id],
         })),
-    [cart],
+    [cart, products],
   );
 
   const subtotal = lineItems.reduce(
@@ -39,25 +31,44 @@ export default function HomePage() {
   const serviceFee = Math.round(subtotal * 0.08);
   const total = subtotal + serviceFee;
 
-  const addToCart = (product: Product) => {
+  const addToCart = (productId: string, stock: number) => {
     setCart((current) => ({
       ...current,
-      [product.id]: (current[product.id] ?? 0) + 1,
+      [productId]: Math.min(stock, (current[productId] ?? 0) + 1),
     }));
   };
 
-  const updateQuantity = (productId: number, delta: number) => {
+  const updateQuantity = (productId: string, delta: number, stock: number) => {
     setCart((current) => {
       const next = (current[productId] ?? 0) + delta;
       if (next <= 0) {
-        const { [productId]: _removed, ...rest } = current;
-        return rest;
+        const nextCart = { ...current };
+        delete nextCart[productId];
+        return nextCart;
       }
-      return { ...current, [productId]: next };
+      return { ...current, [productId]: Math.min(stock, next) };
     });
   };
 
   const clearCart = () => setCart({});
+
+  const completeSale = async () => {
+    if (!supabase || lineItems.length === 0) return;
+    setSubmitting(true);
+    setSaleError("");
+    setSaleMessage("");
+    const { error } = await supabase.rpc("complete_sale", {
+      p_payment_method: payment,
+      p_items: lineItems.map(({ id, quantity }) => ({ product_id: id, quantity })),
+    });
+    setSubmitting(false);
+    if (error) {
+      setSaleError(error.message);
+      return;
+    }
+    clearCart();
+    setSaleMessage("会計を保存しました。");
+  };
 
   return (
     <div className="space-y-6">
@@ -77,12 +88,13 @@ export default function HomePage() {
           </div>
 
           <div className="grid gap-3 sm:grid-cols-2">
-            {products.map((product) => (
+            {products.filter((product) => product.is_active).map((product) => (
               <button
                 key={product.id}
                 type="button"
-                onClick={() => addToCart(product)}
-                className="rounded-2xl border border-[#d7e0eb] bg-[#f8fafc] p-4 text-left transition hover:border-[#b9d6ff] hover:bg-[#eef5ff]"
+                onClick={() => addToCart(product.id, product.stock)}
+                disabled={product.stock === 0 || (cart[product.id] ?? 0) >= product.stock}
+                className="rounded-2xl border border-[#d7e0eb] bg-[#f8fafc] p-4 text-left transition hover:border-[#b9d6ff] hover:bg-[#eef5ff] disabled:cursor-not-allowed disabled:opacity-50"
               >
                 <div className="mb-3 flex items-center justify-between">
                   <span className="rounded-full bg-[#eaf3ff] px-2 py-1 text-[10px] font-medium text-[#005bac]">
@@ -94,9 +106,15 @@ export default function HomePage() {
                 <p className="mt-3 text-2xl font-bold text-[#0a6e54]">
                   ¥{product.price.toLocaleString()}
                 </p>
+                <p className="mt-1 text-xs text-[#526071]">在庫 {product.stock}</p>
               </button>
             ))}
+            {!loading && products.filter((product) => product.is_active).length === 0 && (
+              <p className="text-sm text-[#526071]">販売中の商品がありません。商品・在庫ページで追加してください。</p>
+            )}
           </div>
+          {loading && <p className="mt-4 text-sm text-[#526071]">商品を読み込み中...</p>}
+          {productsError && <p role="alert" className="mt-4 text-sm text-[#b42318]">{productsError}</p>}
         </section>
 
         <aside className="rounded-2xl border border-[#d7e0eb] bg-white p-4 shadow-sm md:p-5">
@@ -134,7 +152,7 @@ export default function HomePage() {
                     <div className="flex items-center rounded-full border border-[#d7e0eb] bg-white">
                       <button
                         type="button"
-                        onClick={() => updateQuantity(item.id, -1)}
+                        onClick={() => updateQuantity(item.id, -1, item.stock)}
                         className="p-2 text-[#334155] hover:bg-[#eef5ff]"
                         aria-label={`${item.name} を1個減らす`}
                       >
@@ -145,7 +163,8 @@ export default function HomePage() {
                       </span>
                       <button
                         type="button"
-                        onClick={() => updateQuantity(item.id, 1)}
+                        onClick={() => updateQuantity(item.id, 1, item.stock)}
+                        disabled={item.quantity >= item.stock}
                         className="p-2 text-[#334155] hover:bg-[#eef5ff]"
                         aria-label={`${item.name} を1個増やす`}
                       >
@@ -155,7 +174,7 @@ export default function HomePage() {
 
                     <button
                       type="button"
-                      onClick={() => updateQuantity(item.id, -item.quantity)}
+                      onClick={() => updateQuantity(item.id, -item.quantity, item.stock)}
                       className="text-xs font-medium text-[#b42318]"
                     >
                       削除
@@ -201,12 +220,17 @@ export default function HomePage() {
             </div>
           </div>
 
+          {saleError && <p role="alert" className="mt-4 text-sm text-[#b42318]">会計を保存できませんでした: {saleError}</p>}
+          {saleMessage && <p role="status" className="mt-4 text-sm text-[#0a6e54]">{saleMessage}</p>}
+
           <button
             type="button"
+            onClick={completeSale}
+            disabled={lineItems.length === 0 || submitting || loading}
             className="mt-5 inline-flex w-full items-center justify-center gap-2 rounded-xl bg-[#005bac] px-4 py-3 font-semibold text-white shadow-sm transition hover:bg-[#004a8d]"
           >
             <ReceiptText className="h-5 w-5" />
-            会計確定
+            {submitting ? "保存中..." : "会計確定"}
           </button>
         </aside>
       </div>
